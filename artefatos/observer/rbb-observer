@@ -1,0 +1,428 @@
+#!/bin/bash
+
+show_help() {
+    echo "Uso: $0 [OPÇÃO]"
+    echo "Se nenhuma OPÇÃO for especificada, instalará apenas o nó observer."
+    echo ""
+    echo "Opções:"
+    echo "  install       Instala componentes com subopções -o, -c, -b, -oc, ou -ob"
+    echo "  logs          Exibe logs com subopções -o, -c, ou -b"
+    echo "  restart       Reinicia componentes com subopções -o, -c, ou -b"
+    echo "  remove        Desinstala componentes com subopções -o, -c, -b, --all"
+    echo "  -h, --help    Mostra esta ajuda e sai."
+    echo "Para mais ajuda em 'install', 'logs', 'restart', ou 'remove', use '$0 [install|logs|restart|remove] --help'"
+}
+
+# Função para mostrar ajuda para 'install'
+show_install_help() {
+    echo "Uso: $0 install [SUBOPÇÃO]"
+    echo ""
+    echo "Subopções para 'install':"
+    echo "  -o      Instala somente o observer."
+    echo "  -c      Instala somente o Chainlens."
+    echo "  -b      Instala somente o Blockscout."
+    echo "  -oc     Instala observer + Chainlens como block explorer."
+    echo "  -ob     Instala observer + Blockscout como block explorer."
+}
+
+# Função para mostrar ajuda para 'logs', 'restart', 'remove'
+show_suboption_help() {
+    case "$1" in
+        logs)
+            echo "Uso: $0 logs [SUBOPÇÃO]"
+            echo ""
+            echo "Subopções para 'logs':"
+            echo "  -o      Mostra os logs do nó Observer"
+            echo "  -c      Mostra os logs do Chainlens"
+            echo "  -b      Mostra os logs do Blockscout"
+            ;;
+        restart)
+            echo "Uso: $0 restart [SUBOPÇÃO]"
+            echo ""
+            echo "Subopções para 'restart':"
+            echo "  -o      Reinicia o nó Observer"
+            echo "  -c      Reinicia o Chainlens"
+            echo "  -b      Reinicia o Blockscout"
+            ;;
+        remove)
+            echo "Uso: $0 remove [SUBOPÇÃO]"
+            echo ""
+            echo "Subopções para 'remove':"
+            echo "  -o      Remove o nó Observer"
+            echo "  -c      Remove o Chainlens"
+            echo "  -b      Remove o Blockscout"
+            echo "  --all   Remove todos os componentes"
+            ;;
+    esac
+    echo "  --help  Mostra esta ajuda"
+}
+
+check_dependencies() {
+    if ! git --version &> /dev/null; then
+        echo "git não encontrado. Saindo..."
+        exit 1
+    fi
+    if ! docker --version &> /dev/null; then
+        echo "Docker não encontrado. Saindo..."
+        exit 1
+    fi
+
+    docker_compose_version=$(docker compose version --short)
+    if [ $? -ne 0 ]; then
+        echo "Docker Compose não encontrado. Saindo..."
+        exit 1
+    elif [[ "$docker_compose_version" == "2.24.7" || "$docker_compose_version" == "2.25.0" || "$docker_compose_version" == "2.26.0" ]]; then
+        echo "Versão do compose $docker_compose_version não compatível. Saindo..."
+        exit 1
+    fi
+}
+
+
+asciititle() {
+  curl -s https://raw.githubusercontent.com/RBBNet/rbb/master/artefatos/observer/asciititle | bash
+}
+
+
+install_observer() {
+    echo 'Iniciando instalação...'
+    sleep 2
+
+    curl -sL https://github.com/RBBNet/start-network/releases/download/v0.4.1%2Bpermv1/start-network.tar.gz | tar xz
+    cd start-network
+    ./rbb-cli node create observer
+    ./rbb-cli config set nodes.observer.ports=[\"8545:8545\"]
+
+    curl -#L https://raw.githubusercontent.com/paulomauricio10/rbb-lab/refs/heads/main/artefatos/observer/genesis.json -o .env.configs/genesis.json
+
+    sed -i '/BESU_PERMISSIONS_NODES_CONTRACT_ENABLED/d' docker-compose.yml.hbs
+    ./rbb-cli config set nodes.observer.environment.BESU_PERMISSIONS_NODES_CONTRACT_ENABLED=false
+    ./rbb-cli config render-templates
+    docker compose up -d
+    if [ $? -ne 0 ]; then
+        echo "Erro ao subir o observer."
+        echo -e "Dica: \e[1;33m./rbb-observer -r\e[0m pode ajudar a remover arquivos residuais."
+        echo "Saindo..."
+        exit 1
+    fi
+    cd ..
+}
+
+install_blockscout() {
+    echo "Subindo Blockscout..."
+    sleep 10
+    export CHAINID=648629
+    get_ip
+    export URL=http://$IP
+    curl -#SL https://github.com/blockscout/blockscout/archive/refs/tags/v6.1.0-beta.tar.gz | tar xz
+    mv blockscout-6.1.0-beta blockscout
+    cd blockscout/docker-compose/
+    curl -#LO https://raw.githubusercontent.com/RBBNet/rbb/master/artefatos/observer/blockscout/docker-compose/docker-compose.yml
+    sed -i "s/\$CHAINID/${CHAINID}/g" docker-compose.yml
+    cd envs
+    curl -#L \
+    -O https://raw.githubusercontent.com/RBBNet/rbb/master/artefatos/observer/blockscout/docker-compose/envs/common-blockscout.env \
+    -O https://raw.githubusercontent.com/RBBNet/rbb/master/artefatos/observer/blockscout/docker-compose/envs/common-frontend.env \
+    -O https://raw.githubusercontent.com/RBBNet/rbb/master/artefatos/observer/blockscout/docker-compose/envs/common-smart-contract-verifier.env \
+    -O https://raw.githubusercontent.com/RBBNet/rbb/master/artefatos/observer/blockscout/docker-compose/envs/common-stats.env \
+    -O https://raw.githubusercontent.com/RBBNet/rbb/master/artefatos/observer/blockscout/docker-compose/envs/common-visualizer.env
+    sed -i "s/\$IP_LOCALHOST/${IP}/g" *
+    sed -i "s/\$CHAINID/${CHAINID}/g" *
+    cd ../proxy
+    sed -i "s/localhost/${IP}/g" *
+    cd ..
+    docker compose up -d
+    cd ../..
+    echo
+    sleep 10
+    echo "Block Explorer disponível em $URL"
+    open_in_browser
+}
+
+install_chainlens() {
+    echo "Subindo Chainlens..."
+    sleep 10
+    get_ip
+    export PORT=5001
+    export URL=http://$IP:$PORT
+    git clone -n https://github.com/web3labs/chainlens-free
+    cd chainlens-free
+    git checkout 484e254563948ac147795ee393af6b547ffef02d > /dev/null 2>&1
+    cd docker-compose
+    sed -i "s/WS_API_URL=http:\/\//WS_API_URL=ws:\/\//g" docker-compose.yml
+    case "$(uname -a)" in
+        *CYGWIN*|*MINGW*|*MSYS*|*Microsoft*|*microsoft*|*WSL*|*wsl*)
+            NODE_ENDPOINT=http://host.docker.internal:8545 PORT=$PORT docker compose -f docker-compose.yml -f chainlens-extensions/docker-compose-besu.yml up -d
+            ;;
+        *)
+            NODE_ENDPOINT=http://$IP:8545 PORT=$PORT docker compose -f docker-compose.yml -f chainlens-extensions/docker-compose-besu.yml up -d
+            ;;
+    esac
+    cd ../..
+    echo
+    echo "Block Explorer disponível em $URL"
+    open_in_browser
+}
+
+# Host IP grabber
+get_ip() {
+  local out ips
+  out="$(hostname -I 2>/dev/null || true)"
+  # tenta achar algo que NÃO seja loopback nem docker bridge “clássica”
+  ips=$(echo "$out" | awk '{
+    for(i=1;i<=NF;i++){
+      if($i !~ /^127\\./ && $i !~ /^172\\.17\\./ && $i !~ /^172\\.18\\./){
+        print $i; exit
+      }
+    }
+  }')
+  if [[ -z "$ips" ]]; then
+    # fallback via rota (pega interface usada para sair à Internet)
+    ips=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {for (i=1;i<=NF;i++) if ($i == \"src\") print $(i+1)}')
+  fi
+  if [[ -z "$ips" ]]; then
+    # fallback final: metadata (sempre funciona em EC2 se permissão)
+    ips=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4 || true)
+  fi
+  export IP="$ips"
+}
+
+open_in_browser() {
+    case "$(uname -a)" in
+        *CYGWIN*|*MINGW*|*MSYS*|*Microsoft*|*microsoft*|*WSL*|*wsl*)
+            cmd.exe /c start "$URL" > /dev/null 2>&1
+            ;;
+        *Linux*)
+            xdg-open "$URL" > /dev/null 2>&1
+            ;;
+        *Darwin*)
+            open "$URL" > /dev/null 2>&1
+            ;;
+    esac
+}
+
+
+check_if_observer_is_absent() {
+    if [ ! -d "start-network" ]; then
+        echo "Observer ausente"
+        exit 1
+    fi
+}
+
+check_if_chainlens_is_absent() {
+    if [ ! -d "chainlens-free" ]; then
+        echo "Chainlens ausente"
+        exit 1
+    fi
+}
+
+check_if_blockscout_is_absent() {
+    if [ ! -d "blockscout" ]; then
+        echo "Blockscout ausente"
+        exit 1
+    fi
+}
+
+check_if_observer_already_installed() {
+    if ls | grep -q "start-network"; then
+        echo -e "Diretório do Observer detectado. Digite \e[1;33m./rbb-observer remove -o\e[0m para remover."
+        exit 1
+    fi
+}
+
+check_if_chainlens_already_installed() {
+    if ls | grep -q "chainlens-free"; then
+        echo -e "Diretório do Chainlens detectado. Digite \e[1;33m./rbb-observer remove -c\e[0m para remover."
+        exit 1
+    fi
+}
+
+check_if_blockscout_already_installed() {
+    if ls | grep -q "blockscout"; then
+        echo -e "Diretório do Blockscout detectado. Digite \e[1;33m./rbb-observer remove -b\e[0m para remover."
+        exit 1
+    fi
+}
+
+
+case "$1" in
+    -h | --help)
+        show_help
+        exit 0
+        ;;
+    install)
+        case "$2" in
+            --help)
+                show_install_help
+                exit 0
+                ;;
+            -o)
+                check_dependencies
+                check_if_observer_already_installed
+                asciititle
+                echo "Instalando apenas nó Observer..."
+                install_observer
+                ;;
+            -c)
+                check_dependencies
+                check_if_chainlens_already_installed
+                asciititle
+                echo "Instalando apenas o Chainlens..."
+                install_chainlens
+                ;;
+            -b)
+                check_dependencies
+                check_if_blockscout_already_installed
+                asciititle
+                echo "Instalando apenas o Blockscout..."
+                install_blockscout
+                ;;
+            -oc)
+                check_dependencies
+                check_if_observer_already_installed
+                check_if_chainlens_already_installed
+                asciititle
+                echo "Instalando nó Observer + Chainlens..."
+                install_observer
+                install_chainlens
+                ;;
+            -ob)
+                check_dependencies
+                check_if_observer_already_installed
+                check_if_blockscout_already_installed
+                asciititle
+                echo "Instalando nó Observer + Blockscout..."
+                install_observer
+                install_blockscout
+                ;;
+            *)
+                echo "Subopção inválida para 'install'"
+                show_suboption_help "install"
+                exit 0
+                ;;
+        esac
+        ;;
+    logs)
+        case "$2" in
+            --help)
+                show_suboption_help "logs"
+                exit 0
+                ;;
+            -o)
+                check_if_observer_is_absent
+                docker compose -f start-network/docker-compose.yml logs -f
+                ;;
+            -c)
+                check_if_chainlens_is_absent
+                docker compose -f chainlens-free/docker-compose/docker-compose.yml logs -f
+                ;;
+            -b)
+                check_if_blockscout_is_absent
+                docker compose -f blockscout/docker-compose/docker-compose.yml logs -f
+                ;;
+            *)
+                if [ -z "$2" ]; then
+                    show_suboption_help "logs"
+                else
+                    echo "Subopção inválida para 'logs', saindo..."
+                fi
+                exit 0
+                ;;
+        esac
+        ;;
+    restart)
+        case "$2" in
+            --help)
+                show_suboption_help "restart"
+                exit 0
+                ;;
+            -o)
+                check_if_observer_is_absent
+                docker compose -f start-network/docker-compose.yml restart
+                ;;
+            -c)
+                check_if_chainlens_is_absent
+                docker compose -f chainlens-free/docker-compose/docker-compose.yml restart
+                ;;
+            -b)
+                check_if_blockscout_is_absent
+                docker compose -f blockscout/docker-compose/docker-compose.yml restart
+                ;;
+            *)
+                if [ -z "$2" ]; then
+                    show_suboption_help "restart"
+                else
+                    echo "Subopção inválida para 'restart', saindo..."
+                fi
+                exit 0
+                ;;
+        esac
+        ;;
+    remove)
+        case "$2" in
+            --help)
+                show_suboption_help "remove"
+                exit 0
+                ;;
+            -o)
+                check_if_observer_is_absent
+                echo "Removendo o nó Observer..."
+                sleep 2
+                docker compose -f start-network/docker-compose/docker-compose.yml down --remove-orphans > /dev/null 2>&1
+                sudo rm -rf start-network
+                echo "Nó Observer removido com sucesso."
+                ;;
+            -c)
+                check_if_chainlens_is_absent
+                echo "Removendo o Chainlens..."
+                sleep 2
+                docker compose -f chainlens-free/docker-compose/docker-compose.yml down --remove-orphans > /dev/null 2>&1
+                sudo rm -rf chainlens-free
+                echo "Chainlens removido com sucesso."
+                ;;
+            -b)
+                check_if_blockscout_is_absent
+                echo "Removendo o Blockscout..."
+                sleep 2
+                docker compose -f blockscout/docker-compose/docker-compose.yml down --remove-orphans > /dev/null 2>&1
+                sudo rm -rf blockscout
+                echo "Blockscout removido com sucesso."
+                ;;
+            --all)
+                if [[ ! -d "start-network" ]] && [[ ! -d "chainlens-free" ]] && [[ ! -d "blockscout" ]]; then
+                    echo "Nenhuma instância encontrada."
+                    exit 1
+                fi
+                echo "Removendo todos os componentes..."
+                sleep 2
+                docker compose -f start-network/docker-compose.yml down --remove-orphans
+                sudo rm -rf start-network > /dev/null 2>&1
+                docker compose -f chainlens-free/docker-compose/docker-compose.yml down --remove-orphans > /dev/null 2>&1
+                sudo rm -rf chainlens-free > /dev/null 2>&1
+                docker compose -f blockscout/docker-compose/docker-compose.yml down --remove-orphans > /dev/null 2>&1
+                sudo rm -rf blockscout > /dev/null 2>&1
+                echo "Todos os componentes removidos com sucesso."
+                ;;
+            *)
+                if [ -z "$2" ]; then
+                    show_suboption_help "remove"
+                else
+                    echo "Subopção inválida para 'remove', saindo..."
+                fi
+                exit 0
+                ;;
+        esac
+        ;;
+    *)
+        if [ -z "$1" ]; then
+            show_help
+        else
+            echo "Opção inválida, mostrando ajuda..."
+            sleep 1
+            show_help
+        fi
+        exit 0
+        ;;
+esac
+
+
+echo 'Feito.'
